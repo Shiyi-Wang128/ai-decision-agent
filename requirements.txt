@@ -1,0 +1,8 @@
+openai
+sqlalchemy
+psycopg2-binary
+python-dotenv
+pandas
+xgboost
+scikit-learn
+streamlit
