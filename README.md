@@ -1,106 +1,156 @@
-# AI Decision Agent
+# E-Commerce Decision Agent
 
-A multi-tool AI agent that answers business questions about e-commerce data 
-using natural language. Built with LLM-powered Text-to-SQL and XGBoost demand forecasting.
+Small e-commerce sellers make inventory and pricing decisions based on intuition — often leading to overstock or stockouts. This agent lets sellers ask business questions in plain English and **automatically routes to the right tool**: SQL queries for historical analysis, XGBoost forecasting for demand prediction.
+
+**[Shiyi Wang](https://github.com/Shiyi-Wang128)** · MS Data Science, UC San Diego
+
+---
 
 ## Demo
 
-**Query:** "哪些品类销量最高？" (Which product categories have the highest sales?)
+**Historical Data Query** — natural language → SQL → results + visualization
 
-The agent automatically routes the question to the right tool, generates SQL, 
-queries the database, and returns results with business insights.
+![SQL Query Demo](assets/screenshot_sql.png)
 
-## Architecture
+**Demand Forecast** — natural language → auto-fetch history from DB → XGBoost → business insight
+
+![Demand Forecast Demo](assets/screenshot_forecast.png)
+
+---
+
+## How It Works
+
 ```
 User Question (natural language)
-↓
-LLM Router (decides which tool to use)
-↓
-┌───────────────────┬──────────────────────┐
-│   Text-to-SQL     │   Demand Forecast    │
-│  (historical data)│  (future prediction) │
-└───────────────────┴──────────────────────┘
-↓
-Result + Business Insight (in natural language)
+        ↓
+  LLM Router (GPT-4o)
+  "Is this about the past or the future?"
+        ↓
+┌─────────────────────────┬──────────────────────────────┐
+│      Text-to-SQL        │       Demand Forecast         │
+│                         │                               │
+│  GPT-4o generates       │  1. Auto-fetch real lag       │
+│  PostgreSQL query →     │     features from DB (SQL)    │
+│  runs on 100K+ orders   │  2. XGBoost predicts sales    │
+└─────────────────────────┴──────────────────────────────┘
+        ↓
+  LLM summarizes result into plain-language business insight
 ```
 
-## Features
+The forecast path uses **chained tool use**: the agent first queries the database for real historical sales, then feeds those numbers into XGBoost — no manual input required from the user.
 
-- **Natural language interface**: Ask questions in plain language, no SQL knowledge needed
-- **Automatic tool routing**: Agent decides whether to query database or run ML model
-- **Text-to-SQL**: Converts natural language to PostgreSQL queries automatically
-- **Demand forecasting**: XGBoost model predicts future sales by product category
-- **Feature importance**: Shows which factors drive the prediction
-- **Business insights**: LLM summarizes results into actionable recommendations
+---
 
-## Tech Stack
+## Example Queries
 
-- **LLM**: OpenAI GPT-4o (routing, SQL generation, insight generation)
-- **ML Model**: XGBoost with feature importance analysis
-- **Database**: PostgreSQL
-- **Backend**: Python, SQLAlchemy, FastAPI (in progress)
-- **Frontend**: Streamlit
-- **Data**: Olist Brazilian E-Commerce Dataset (100K+ orders)
+| Question | Tool | What Happens |
+|---|---|---|
+| Which product categories have the highest sales? | Text-to-SQL | Generates + runs SQL, returns ranked table + bar chart |
+| Forecast demand for bed & bath in September 2018 | Demand Forecast | Fetches 3-month sales history from DB → XGBoost prediction |
+| Which state has the most customers? | Text-to-SQL | Joins customers + orders, aggregates by state |
+| What was the monthly order volume in 2017? | Text-to-SQL | Time-series aggregation with trend insight |
 
-## Project Structure
-```
-ai_decision_agent/
-├── app/
-│   ├── agent/
-│   │   ├── core.py          # Agent routing and orchestration
-│   │   └── tools/
-│   │       ├── sql_tool.py  # Text-to-SQL tool
-│   │       └── ml_tool.py   # XGBoost forecasting tool
-├── data/
-│   └── raw/                 # Olist dataset (not included)
-├── models/                  # Trained XGBoost model
-├── pipelines/
-│   ├── build_dataset.py     # Load CSV data into PostgreSQL
-│   └── train_model.py       # Train XGBoost demand forecast model
-├── frontend/
-│   └── app.py               # Streamlit UI
-└── utils/
-└── db.py                # Database connection
-```
+---
 
-## Setup
+## Model Performance
 
-1. Clone the repo
-```bash
-git clone https://github.com/YOUR_USERNAME/ai-decision-agent.git
-cd ai-decision-agent
-```
+XGBoost demand forecasting model evaluated on a holdout test set (last 3 months: 2018-07 to 2018-09). **Time-based split used to prevent data leakage.**
 
-2. Install dependencies
-```bash
-pip install -r requirements.txt
-```
+| Metric | Value |
+|---|---|
+| MAE | 19.9 units/month |
+| RMSE | 36.8 units/month |
+| Test set size | 130 samples across 71 categories |
 
-3. Set up environment variables
-```bash
-cp .env.example .env
-# Fill in your credentials
-```
+> Note: MAPE is high (70.4%) due to small absolute volumes in long-tail categories — a known limitation with sparse time series data.
 
-4. Load data into database
-```bash
-python -m pipelines.build_dataset
-```
+**Key finding:** Last month's sales (`lag_1`) drives **72.6%** of prediction importance — the single strongest signal for inventory planning.
 
-5. Train the model
-```bash
-python -m pipelines.train_model
-```
+**Per-category accuracy (sample):**
 
-6. Run the app
-```bash
-python -m streamlit run frontend/app.py
-```
+| Category | MAE | Interpretation |
+|---|---|---|
+| fashion_roupa_masculina | 2.0 | Very stable — easy to plan |
+| fraldas_higiene | 3.6 | Consistent, predictable demand |
+| moveis_decoracao | 87.8 | High volatility — plan conservatively |
+| informatica_acessorios | 101.1 | Spiky demand — buffer stock recommended |
+
+---
+
+## Text-to-SQL Evaluation
+
+Evaluated on 20 business questions covering category analysis, regional distribution, time trends, payment methods, and seller performance.
+
+| Metric | Result |
+|---|---|
+| Execution Accuracy | 20/20 = 100% |
+| Result Accuracy | 13/14 = 92.9% |
+
+Known limitation: queries referencing the payments table occasionally fail due to table name ambiguity in SQL generation (Q05, Q13).
+
+---
 
 ## Dataset
 
-[Olist Brazilian E-Commerce Dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) — 100K+ orders, 32K+ products, 71 product categories.
+[Olist Brazilian E-Commerce Dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
 
-## Author
+- 100K+ orders · 32K+ products · 71 product categories
+- 5 relational tables: `customers`, `orders`, `order_items`, `products`, `sellers`
+- Date range: 2016–2018
 
-Shiyi Wang | MS Data Science, UC San Diego
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| LLM | OpenAI GPT-4o (routing, SQL generation, insight generation) |
+| ML Model | XGBoost with feature importance analysis |
+| Database | PostgreSQL + SQLAlchemy |
+| Frontend | Streamlit |
+| Data Pipeline | pandas, custom ETL scripts |
+
+---
+
+## Project Structure
+
+```
+ai_decision_agent/
+├── app/
+│   └── agent/
+│       ├── core.py            # Agent routing + orchestration
+│       └── tools/
+│           ├── sql_tool.py    # Text-to-SQL: schema → GPT-4o → PostgreSQL
+│           └── ml_tool.py     # XGBoost inference + feature importance
+├── pipelines/
+│   ├── build_dataset.py       # Load Olist CSVs into PostgreSQL
+│   └── train_model.py         # Train + evaluate XGBoost (time-based split)
+├── frontend/
+│   └── app.py                 # Streamlit UI
+├── assets/                    # Screenshots for README
+├── utils/
+│   └── db.py                  # Database connection
+└── eval_sql.py                # Text-to-SQL evaluation suite (20 questions)
+```
+
+---
+
+## Setup
+
+```bash
+git clone https://github.com/Shiyi-Wang128/ai-decision-agent.git
+cd ai-decision-agent
+pip install -r requirements.txt
+
+cp .env.example .env
+# Add your OpenAI API key and PostgreSQL credentials
+
+python -m pipelines.build_dataset      # Load data into PostgreSQL
+python -m pipelines.train_model        # Train XGBoost (prints eval metrics)
+streamlit run frontend/app.py          # Launch the app
+```
+
+**Run Text-to-SQL evaluation:**
+```bash
+python eval_sql.py
+```

@@ -4,20 +4,24 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from app.agent.tools.sql_tool import get_schema, generate_sql, run_query, interpret
 from app.agent.tools.ml_tool import predict_demand
+from sqlalchemy import text
+from utils.db import get_engine
 
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+engine = get_engine()
+
 
 def route_question(question):
-    prompt = f"""你是一个智能路由器，判断用户的问题应该用哪个工具回答。
+    prompt = f"""You are an intelligent router. Decide which tool should answer the user's question.
 
-工具一：sql_query - 用于查询历史数据，比如"哪个品类卖得最好"、"过去销售趋势"、"客户分布"
-工具二：demand_forecast - 用于预测未来销量，比如"下个月应该备多少货"、"未来需求预测"、"库存优化"
+Tool 1: sql_query — for querying historical data, e.g. "which category sells best", "past sales trends", "customer distribution"
+Tool 2: demand_forecast — for predicting future sales, e.g. "how much should I stock next month", "future demand forecast", "inventory optimization"
 
-用户问题：{question}
+User question: {question}
 
-只回答工具名称，sql_query 或者 demand_forecast，不要其他任何内容。"""
+Reply with only the tool name: sql_query or demand_forecast. Nothing else."""
 
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -25,62 +29,124 @@ def route_question(question):
     )
     return response.choices[0].message.content.strip()
 
-def handle_forecast(question):
-    prompt = f"""用户问题：{question}
 
-请从这个问题里提取预测参数，返回JSON格式：
+def fetch_real_lag_features(category: str, target_year: int, target_month: int):
+    """
+    从数据库查真实历史销量，计算 lag_1、lag_2、rolling_mean_3。
+    比"默认填500"更准确，也让这个 Agent 真正做到 chained tool use：
+    预测问题 → 先查 SQL → 再跑 ML。
+    """
+    query = text("""
+        SELECT
+            DATE_TRUNC('month', o.order_purchase_timestamp::timestamp) AS month,
+            COUNT(oi.order_item_id) AS sales_count
+        FROM order_items oi
+        JOIN orders o ON oi.order_id = o.order_id
+        JOIN products p ON oi.product_id = p.product_id
+        WHERE p.product_category_name = :category
+          AND o.order_purchase_timestamp IS NOT NULL
+          AND DATE_TRUNC('month', o.order_purchase_timestamp::timestamp)
+              < DATE_TRUNC('month', MAKE_DATE(:year, :month, 1)::timestamp)
+        GROUP BY month
+        ORDER BY month DESC
+        LIMIT 3
+    """)
+
+    with engine.connect() as conn:
+        result = conn.execute(query, {"category": category, "year": target_year, "month": target_month})
+        rows = result.fetchall()
+
+    if len(rows) < 1:
+        return None, f"数据库中找不到品类 '{category}' 的历史数据，请检查品类名称（需要葡萄牙语，如 cama_mesa_banho）"
+
+    # rows 按时间倒序：rows[0] = 上个月, rows[1] = 上上个月, rows[2] = 3个月前
+    sales = [int(r[1]) for r in rows]
+
+    lag_1 = sales[0]
+    lag_2 = sales[1] if len(sales) >= 2 else sales[0]
+    rolling_mean_3 = round(sum(sales) / len(sales), 1)
+
+    return {
+        "lag_1": lag_1,
+        "lag_2": lag_2,
+        "rolling_mean_3": rolling_mean_3,
+        "history_used": [{"month": str(r[0])[:7], "sales": int(r[1])} for r in rows]
+    }, None
+
+
+def extract_forecast_params(question: str):
+    prompt = f"""User question: {question}
+
+Extract the forecast parameters from this question and return JSON:
 {{
-    "category": "品类名（用葡萄牙语，比如cama_mesa_banho）",
-    "month": 月份数字,
-    "year": 年份数字,
-    "lag_1": 上个月预估销量（如果没提到就用500）,
-    "lag_2": 上上个月预估销量（如果没提到就用500）,
-    "rolling_mean_3": 近三个月平均销量（如果没提到就用500）
+    "category": "category name in Portuguese (e.g. cama_mesa_banho)",
+    "month": month as integer,
+    "year": year as integer
 }}
-只返回JSON，不要其他内容。"""
+Return only the JSON, nothing else."""
 
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": prompt}]
     )
-
     params_str = response.choices[0].message.content.strip()
     params_str = params_str.replace("```json", "").replace("```", "").strip()
-    params = json.loads(params_str)
+    return json.loads(params_str)
 
-    prediction, shap = predict_demand(
-        category=params['category'],
-        month=params['month'],
-        year=params['year'],
-        lag_1=params['lag_1'],
-        lag_2=params['lag_2'],
-        rolling_mean_3=params['rolling_mean_3']
+
+def handle_forecast(question: str):
+    # Step 1: LLM 提取品类 + 时间
+    params = extract_forecast_params(question)
+    category = params['category']
+    month = params['month']
+    year = params['year']
+
+    # Step 2: 自动查数据库获取真实 lag 特征（chained tool use）
+    lag_features, error = fetch_real_lag_features(category, year, month)
+    if error:
+        return None, None, error
+
+    # Step 3: XGBoost 预测
+    prediction, feature_impact = predict_demand(
+        category=category,
+        month=month,
+        year=year,
+        lag_1=lag_features['lag_1'],
+        lag_2=lag_features['lag_2'],
+        rolling_mean_3=lag_features['rolling_mean_3'],
     )
 
     if prediction is None:
-        return None, None, f"无法预测：{shap}"
+        return None, None, feature_impact  # feature_impact 此时是 error message
+
+    # Step 4: LLM 把技术结果翻译成业务语言
+    history_str = " | ".join([f"{h['month']}: {h['sales']}件" for h in lag_features['history_used']])
+    top_factor = max(feature_impact, key=lambda k: abs(feature_impact[k]))
 
     raw_result = f"""
-预测结果：{params['category']} 在 {params['year']}年{params['month']}月 预计销量为 {prediction} 件
+品类：{category}
+预测月份：{year}年{month}月
+预测销量：{prediction} 件
 
-SHAP解释：
-{chr(10).join([f"  {k}: {v:+.1f}" for k, v in shap.items()])}
-主要影响因素：{max(shap, key=lambda k: abs(shap[k]))}
+历史参考数据（来自数据库）：{history_str}
+最重要的预测因子：{top_factor}（重要性：{feature_impact[top_factor]:.3f}）
 """
 
-    prompt2 = f"""你是一个数据分析师，用简单易懂的中文向业务人员解释以下预测结果，不要提SHAP这个词，把技术术语翻译成业务语言，2-3句话：
+    prompt = f"""You are a data analyst. Explain the following forecast result to an e-commerce seller in plain English.
+    Do not use technical jargon. Give a practical inventory recommendation in 2-3 sentences.
 
-{raw_result}"""
+    {raw_result}"""
 
-    response2 = client.chat.completions.create(
+    response = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "user", "content": prompt2}]
+        messages=[{"role": "user", "content": prompt}]
     )
-    business_insight = response2.choices[0].message.content.strip()
+    business_insight = response.choices[0].message.content.strip()
 
-    return prediction, shap, business_insight
+    return prediction, feature_impact, business_insight
 
-def ask(question):
+
+def ask(question: str):
     result = {
         "question": question,
         "tool": None,
@@ -88,18 +154,21 @@ def ask(question):
         "columns": None,
         "rows": None,
         "prediction": None,
-        "shap": None,
-        "insight": None
+        "feature_impact": None,
+        "insight": None,
+        "error": None,
     }
 
     tool = route_question(question)
     result["tool"] = tool
 
     if tool == "demand_forecast":
-        prediction, shap, insight = handle_forecast(question)
+        prediction, feature_impact, insight = handle_forecast(question)
         result["prediction"] = prediction
-        result["shap"] = shap
+        result["feature_impact"] = feature_impact
         result["insight"] = insight
+        if prediction is None:
+            result["error"] = insight
     else:
         schema = get_schema()
         sql = generate_sql(question, schema)

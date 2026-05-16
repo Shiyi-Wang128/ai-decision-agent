@@ -51,12 +51,12 @@ def interpret(question, columns, rows):
     for row in rows[:10]:
         data_str += str(row) + "\n"
 
-    prompt = f"""你是一个数据分析师。用户问了这个问题：{question}
+    prompt = f"""You are a data analyst. The user asked: {question}
 
-查询结果如下：
+Query results:
 {data_str}
 
-请用2-3句话总结这个结果，给出业务洞察和建议。用中文回答。"""
+Summarize the results in 2-3 sentences with a business insight and recommendation. Reply in English."""
 
     response = client.chat.completions.create(
         model="gpt-4o",
