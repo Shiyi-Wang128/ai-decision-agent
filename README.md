@@ -1,6 +1,6 @@
 # E-Commerce Decision Agent
 
-Small e-commerce sellers make inventory and pricing decisions based on intuition — often leading to overstock or stockouts. This agent lets sellers ask business questions in plain English and **automatically routes to the right tool**: SQL queries for historical analysis, XGBoost forecasting for demand prediction.
+At e-commerce companies, market analysts spend hours manually writing SQL queries, engineering features, and running demand forecasts — only to repeat the entire cycle when stakeholders ask a follow-up question. This agent automates that workflow: ask a business question in plain English, and the system automatically routes to the right tool — SQL for historical analysis, XGBoost for demand forecasting — and returns a plain-language insight.
 
 **[Shiyi Wang](https://github.com/Shiyi-Wang128)** · MS Data Science, UC San Diego
 
